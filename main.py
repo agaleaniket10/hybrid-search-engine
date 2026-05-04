@@ -1,183 +1,112 @@
-import sqlite3
-import numpy as np
+"""
+main.py - Entry point for the hybrid search engine.
+
+Usage:
+    python main.py              # interactive CLI mode
+    python main.py --eval       # run evaluation benchmark
+"""
+
+import argparse
+import logging
 import time
-import faiss
-from sentence_transformers import SentenceTransformer, CrossEncoder
 
-# =========================================================
-# MODELS
-# =========================================================
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+from config import EMBED_MODEL, RERANKER_MODEL, SAMPLE_DOCS, TOP_K
+from evaluation import run_evaluation
+from search.hybrid import HybridSearchEngine
 
-# =========================================================
-# DATASET (docs + ground truth queries)
-# =========================================================
-docs = [
-    "Invoice 12345 payment pending",
-    "Refund policy allows 30 days return",
-    "Customer account locked due to suspicious activity",
-    "FAISS is a vector similarity search library",
-    "Hybrid search combines lexical and semantic retrieval",
-]
-
-# ground truth for evaluation (what should be relevant)
-eval_set = [
-    {"query": "invoice payment", "relevant": ["Invoice 12345 payment pending"]},
-    {"query": "refund policy", "relevant": ["Refund policy allows 30 days return"]},
-    {
-        "query": "vector search library",
-        "relevant": ["FAISS is a vector similarity search library"],
-    },
-]
-
-# =========================================================
-# BM25 (SQLite FTS5)
-# =========================================================
-conn = sqlite3.connect(":memory:")
-c = conn.cursor()
-c.execute("CREATE VIRTUAL TABLE docs USING fts5(content)")
-
-for d in docs:
-    c.execute("INSERT INTO docs(content) VALUES (?)", (d,))
-conn.commit()
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
-def bm25_search(query, k=5):
-    # Sanitize query for FTS5: keep only alphanumeric and spaces
-    safe_query = " ".join(word for word in query.split() if word.isalnum())
-    if not safe_query:
-        return []
-    try:
-        res = c.execute("SELECT content FROM docs WHERE docs MATCH ?", (safe_query,))
-        return [r[0] for r in res.fetchall()][:k]
-    except sqlite3.OperationalError:
-        return []
+# ---------------------------------------------------------------------------
+# Interactive CLI
+# ---------------------------------------------------------------------------
 
 
-# =========================================================
-# VECTOR SEARCH (FAISS)
-# =========================================================
-doc_embeddings = embed_model.encode(docs)
-dim = doc_embeddings.shape[1]
+def interactive(engine: HybridSearchEngine) -> None:
+    """
+    Run an interactive query loop in the terminal.
 
-index = faiss.IndexFlatL2(dim)
-index.add(np.array(doc_embeddings).astype("float32"))
+    Args:
+        engine: Initialised HybridSearchEngine instance.
+    """
+    print("\nHybrid Search Engine — type 'eval' to benchmark, 'exit' to quit.\n")
 
-
-def vector_search(query, k=5):
-    q = embed_model.encode([query]).astype("float32")
-    _, idx = index.search(q, k)
-    return [docs[i] for i in idx[0]]
-
-
-# =========================================================
-# HYBRID + RERANK
-# =========================================================
-def rerank(query, docs):
-    pairs = [(query, d) for d in docs]
-    scores = reranker.predict(pairs)
-    ranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
-    return [r[0] for r in ranked]
-
-
-def hybrid_search(query):
-    bm = bm25_search(query)
-    vec = vector_search(query)
-
-    merged = list(set(bm + vec))
-    return rerank(query, merged)
-
-
-# =========================================================
-# METRICS
-# =========================================================
-def recall_at_k(predicted, relevant, k=5):
-    pred_k = predicted[:k]
-    return int(any(r in pred_k for r in relevant))
-
-
-def mrr(predicted, relevant):
-    for i, p in enumerate(predicted):
-        if p in relevant:
-            return 1 / (i + 1)
-    return 0
-
-
-# =========================================================
-# COST ESTIMATOR
-# =========================================================
-def estimate_cost(num_queries):
-    # fake realistic approximation
-    embedding_cost = num_queries * 0.0001
-    rerank_cost = num_queries * 0.0003
-    return embedding_cost + rerank_cost
-
-
-# =========================================================
-# BENCHMARK PIPELINE
-# =========================================================
-def evaluate_system():
-    print("\n=== EVALUATION START ===")
-
-    total_recall = 0
-    total_mrr = 0
-    latencies = []
-
-    for item in eval_set:
-        start = time.time()
-
-        results = hybrid_search(item["query"])
-
-        latency = (time.time() - start) * 1000
-        latencies.append(latency)
-
-        r = recall_at_k(results, item["relevant"])
-        m = mrr(results, item["relevant"])
-
-        total_recall += r
-        total_mrr += m
-
-        print(f"\nQuery: {item['query']}")
-        print("Results:", results)
-        print("Recall@5:", r)
-        print("MRR:", round(m, 3))
-        print("Latency(ms):", round(latency, 2))
-
-    print("\n=== FINAL METRICS ===")
-    print("Avg Recall@5:", round(total_recall / len(eval_set), 3))
-    print("Avg MRR:", round(total_mrr / len(eval_set), 3))
-    print("Avg Latency(ms):", round(sum(latencies) / len(latencies), 2))
-
-    print("\nEstimated cost for 1000 queries: $", round(estimate_cost(1000), 4))
-
-
-# =========================================================
-# INTERACTIVE MODE
-# =========================================================
-def interactive():
     while True:
-        q = input("\nEnter query (or 'eval'): ")
-
-        if q == "exit":
+        try:
+            query = input("Enter query: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting.")
             break
-        elif q == "eval":
-            evaluate_system()
+
+        if not query:
+            continue
+        if query.lower() == "exit":
+            break
+        if query.lower() == "eval":
+            run_evaluation(engine)
             continue
 
-        start = time.time()
-        results = hybrid_search(q)
-        latency = (time.time() - start) * 1000
+        start = time.perf_counter()
+        results = engine.search(query)
+        latency_ms = (time.perf_counter() - start) * 1000
 
         print("\nTop results:")
-        for r in results:
-            print("-", r)
+        for i, doc in enumerate(results, start=1):
+            print(f"  {i}. {doc}")
+        print(f"Latency: {round(latency_ms, 2)} ms\n")
 
-        print("Latency(ms):", round(latency, 2))
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
 
 
-# =========================================================
-# RUN
-# =========================================================
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Hybrid Search Engine")
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run evaluation benchmark and exit.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging verbosity (default: INFO).",
+    )
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    args = parse_args()
+    logging.getLogger().setLevel(args.log_level)
+
+    logger.info("Loading models — this may take a moment on first run...")
+    engine = HybridSearchEngine(
+        docs=SAMPLE_DOCS,
+        embed_model_name=EMBED_MODEL,
+        reranker_model_name=RERANKER_MODEL,
+        top_k=TOP_K,
+    )
+
+    if args.eval:
+        run_evaluation(engine)
+    else:
+        interactive(engine)
+
+
 if __name__ == "__main__":
-    interactive()
+    main()

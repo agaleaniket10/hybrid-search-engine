@@ -1,5 +1,8 @@
 # 🔍 Hybrid Search Engine (BM25 + FAISS + Reranker)
 
+[![CI](https://github.com/agaleaniket10/hybrid-search-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/agaleaniket10/hybrid-search-engine/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+
+
 A production-style hybrid search system combining lexical and semantic retrieval with neural reranking.
 
 ---
